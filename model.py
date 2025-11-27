@@ -370,15 +370,16 @@ class RestormerSLMR(nn.Module):
 def create_model_s(use_gradient_checkpointing=False):
     """
     Restormer-SLMR Small - modello principale
-    ~4M params, ottimizzato per RTX 5090 con batch_size 8
+    ~3M params, ottimizzato per RTX 5090 con OOM fix
     """
     return RestormerSLMR(
         img_channels=3,
-        width=24,  # Ridotto da 32
-        enc_blks=[1, 2, 2],  # Ridotto da [2, 3, 4]
-        middle_blks=4,  # Ridotto da 6
-        dec_blks=[1, 1, 1],  # Ridotto da [2, 2, 2]
-        window_size=8
+        width=20,  # Ridotto da 24 per OOM
+        enc_blks=[1, 1, 2],  # Ridotto da [1, 2, 2]
+        middle_blks=3,  # Ridotto da 4
+        dec_blks=[1, 1, 1],  # Minimo
+        window_size=4,  # Ridotto da 8 - dimezza memoria attenzione
+        use_gradient_checkpointing=use_gradient_checkpointing
     )
 
 

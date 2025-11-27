@@ -16,12 +16,12 @@ data:
 # Training configuration
 training:
   # Basic settings
-  batch_size: 6  # Ridotto per Restormer-SLMR più complesso
+  batch_size: 4  # Ridotto per Restormer-SLMR più complesso
   epochs: 500
   
   # Optimization
   use_amp: false  # Disabled - problemi con mixed types
-  gradient_accumulation_steps: 4  # Simula batch_size=32
+  gradient_accumulation_steps: 6  # Simula batch_size=24
   compile_model: false  # Disabled - torch.compile ha conflitti con AMP
   use_gradient_checkpointing: true  # CRITICAL per batch_size > 4
   
