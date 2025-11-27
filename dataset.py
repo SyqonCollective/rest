@@ -20,37 +20,31 @@ class StarDataset(Dataset):
             raise FileNotFoundError(f"Split directory not found: {split_dir}")
 
         allowed_ext = {".png", ".jpg", ".jpeg", ".webp", ".tif", ".tiff", ".bmp"}
-        pairs = []
-        seen = set()
+        inputs = {}
+        targets = {}
 
         for fname in os.listdir(split_dir):
             stem, ext = os.path.splitext(fname)
             if ext.lower() not in allowed_ext:
                 continue
-            if not stem.lower().endswith("_input"):
-                continue
-            base = stem[: -len("_input")]
-            input_path = os.path.join(split_dir, fname)
+            stem_lower = stem.lower()
+            path = os.path.join(split_dir, fname)
+            if stem_lower.endswith("_input"):
+                base = stem_lower[: -len("_input")]
+                inputs[base] = path
+            elif stem_lower.endswith("_target"):
+                base = stem_lower[: -len("_target")]
+                targets[base] = path
 
-            target_candidates = [f"{base}_target{ext}"] + [f"{base}_target{e}" for e in allowed_ext]
-            target_path = None
-            for cand in target_candidates:
-                cand_path = os.path.join(split_dir, cand)
-                if os.path.isfile(cand_path):
-                    target_path = cand_path
-                    break
-
-            if target_path is None:
-                continue
-
-            key = (input_path, target_path)
-            if key in seen:
-                continue
-            seen.add(key)
-            pairs.append((input_path, target_path))
+        pairs = []
+        for base, input_path in inputs.items():
+            if base in targets:
+                pairs.append((input_path, targets[base]))
 
         if not pairs:
-            raise RuntimeError(f"No input/target pairs found in {split_dir}. Expected files like <name>_input.png and <name>_target.png")
+            raise RuntimeError(
+                f"No input/target pairs found in {split_dir}. Expected files like <name>_input.png and <name>_target.png"
+            )
         pairs.sort()
         return pairs
 
