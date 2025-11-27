@@ -69,6 +69,8 @@ def build_model(device: torch.device, distributed: bool):
 
 
 def compute_loss(pred: torch.Tensor, target: torch.Tensor, perceptual: nn.Module, return_components: bool = False):
+    pred = pred.float()
+    target = target.float()
     l1 = F.l1_loss(pred, target)
     ssim_loss = 1.0 - ssim(pred, target)
     p_loss = perceptual(pred, target)
@@ -106,7 +108,10 @@ def train_one_epoch(
         with autocast():
             residual = model(inputs)
             outputs = reconstruct_from_residual(inputs, residual)
-            loss, (l1_loss, ssim_loss, p_loss) = compute_loss(outputs, targets, perceptual, return_components=True)
+        # compute loss in fp32 to avoid NaNs with SSIM/perceptual
+        loss, (l1_loss, ssim_loss, p_loss) = compute_loss(
+            outputs.float(), targets.float(), perceptual, return_components=True
+        )
         scaler.scale(loss).backward()
         scaler.step(optimizer)
         scaler.update()
@@ -144,7 +149,7 @@ def validate(model, val_loader, perceptual: nn.Module, device: torch.device, dis
             targets = targets.to(device)
             residual = model(inputs)
             outputs = reconstruct_from_residual(inputs, residual)
-            loss = compute_loss(outputs, targets, perceptual)
+            loss = compute_loss(outputs.float(), targets.float(), perceptual)
             total_loss += loss.detach() * inputs.size(0)
             total_count += inputs.size(0)
             if is_main_process():
