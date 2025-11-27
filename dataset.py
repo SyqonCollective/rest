@@ -19,19 +19,38 @@ class StarDataset(Dataset):
         if not os.path.isdir(split_dir):
             raise FileNotFoundError(f"Split directory not found: {split_dir}")
 
+        allowed_ext = {".png", ".jpg", ".jpeg", ".webp", ".tif", ".tiff", ".bmp"}
         pairs = []
+        seen = set()
+
         for fname in os.listdir(split_dir):
-            if not fname.endswith("_input.png"):
+            stem, ext = os.path.splitext(fname)
+            if ext.lower() not in allowed_ext:
                 continue
-            base = fname[:-10]  # remove _input.png
+            if not stem.lower().endswith("_input"):
+                continue
+            base = stem[: -len("_input")]
             input_path = os.path.join(split_dir, fname)
-            target_name = f"{base}_target.png"
-            target_path = os.path.join(split_dir, target_name)
-            if os.path.isfile(target_path):
-                pairs.append((input_path, target_path))
+
+            target_candidates = [f"{base}_target{ext}"] + [f"{base}_target{e}" for e in allowed_ext]
+            target_path = None
+            for cand in target_candidates:
+                cand_path = os.path.join(split_dir, cand)
+                if os.path.isfile(cand_path):
+                    target_path = cand_path
+                    break
+
+            if target_path is None:
+                continue
+
+            key = (input_path, target_path)
+            if key in seen:
+                continue
+            seen.add(key)
+            pairs.append((input_path, target_path))
 
         if not pairs:
-            raise RuntimeError(f"No input/target pairs found in {split_dir}")
+            raise RuntimeError(f"No input/target pairs found in {split_dir}. Expected files like <name>_input.png and <name>_target.png")
         pairs.sort()
         return pairs
 
