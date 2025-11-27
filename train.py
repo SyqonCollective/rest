@@ -6,7 +6,7 @@ import torch
 import torch.distributed as dist
 import torch.nn.functional as F
 from torch import nn
-from torch.cuda.amp import GradScaler, autocast
+from torch.amp import autocast, GradScaler
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from torch.utils.data import DataLoader, DistributedSampler
@@ -105,13 +105,20 @@ def train_one_epoch(
         inputs = inputs.to(device)
         targets = targets.to(device)
         optimizer.zero_grad(set_to_none=True)
-        with autocast():
+        with autocast("cuda", enabled=device.type == "cuda"):
             residual = model(inputs)
             outputs = reconstruct_from_residual(inputs, residual)
+        outputs = torch.nan_to_num(outputs, nan=0.0, posinf=1.0, neginf=0.0)
+        targets = torch.nan_to_num(targets, nan=0.0, posinf=1.0, neginf=0.0)
         # compute loss in fp32 to avoid NaNs with SSIM/perceptual
         loss, (l1_loss, ssim_loss, p_loss) = compute_loss(
             outputs.float(), targets.float(), perceptual, return_components=True
         )
+        if not torch.isfinite(loss):
+            if is_main_process():
+                pbar.set_postfix(loss="NaN", note="skip step")
+            scaler.update()
+            continue
         scaler.scale(loss).backward()
         scaler.step(optimizer)
         scaler.update()
@@ -149,6 +156,8 @@ def validate(model, val_loader, perceptual: nn.Module, device: torch.device, dis
             targets = targets.to(device)
             residual = model(inputs)
             outputs = reconstruct_from_residual(inputs, residual)
+            outputs = torch.nan_to_num(outputs, nan=0.0, posinf=1.0, neginf=0.0)
+            targets = torch.nan_to_num(targets, nan=0.0, posinf=1.0, neginf=0.0)
             loss = compute_loss(outputs.float(), targets.float(), perceptual)
             total_loss += loss.detach() * inputs.size(0)
             total_count += inputs.size(0)
