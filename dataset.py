@@ -214,7 +214,7 @@ def create_dataloaders(
     num_workers: int = 8,
     patch_size: int = 512,
     pin_memory: bool = True,
-    prefetch: bool = True,
+    prefetch: bool = False,  # Disabled - gestito manualmente
     device: str = 'cuda'
 ) -> Tuple[DataLoader, DataLoader]:
     """
@@ -268,11 +268,6 @@ def create_dataloaders(
         persistent_workers=True if num_workers > 0 else False,
         prefetch_factor=2 if num_workers > 0 else None
     )
-    
-    # Wrap with prefetch loader if requested
-    if prefetch and device == 'cuda':
-        train_loader = PrefetchLoader(train_loader, device=device)
-        val_loader = PrefetchLoader(val_loader, device=device)
     
     return train_loader, val_loader
 

@@ -186,10 +186,9 @@ class Trainer:
         pbar = tqdm(self.train_loader, desc=f"Epoch {epoch}/{self.config['training']['epochs']}")
         
         for i, (inputs, targets) in enumerate(pbar):
-            # Move to device if not using prefetch loader
-            if not isinstance(self.train_loader, type(self.train_loader)):
-                inputs = inputs.to(self.device)
-                targets = targets.to(self.device)
+            # Move to device
+            inputs = inputs.to(self.device, non_blocking=True)
+            targets = targets.to(self.device, non_blocking=True)
             
             # Forward pass with mixed precision
             with autocast('cuda', enabled=self.use_amp):
@@ -260,10 +259,9 @@ class Trainer:
         pbar = tqdm(self.val_loader, desc="Validation")
         
         for i, (inputs, targets) in enumerate(pbar):
-            # Move to device if needed
-            if not isinstance(self.val_loader, type(self.val_loader)):
-                inputs = inputs.to(self.device)
-                targets = targets.to(self.device)
+            # Move to device
+            inputs = inputs.to(self.device, non_blocking=True)
+            targets = targets.to(self.device, non_blocking=True)
             
             # Forward pass
             with autocast('cuda', enabled=self.use_amp):
