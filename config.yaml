@@ -14,12 +14,12 @@ data:
 # Training configuration
 training:
   # Basic settings
-  batch_size: 16  # RTX 5090 can handle 16-32 depending on patch size
+  batch_size: 4  # Ridotto per 512x512 patches
   epochs: 500
   
   # Optimization
   use_amp: false  # Disabled - problemi con mixed types
-  gradient_accumulation_steps: 1  # Increase if OOM (simulates larger batch)
+  gradient_accumulation_steps: 4  # Simula batch_size=16
   compile_model: false  # Disabled - torch.compile ha conflitti con AMP
   
   # EMA (Exponential Moving Average)
