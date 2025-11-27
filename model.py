@@ -302,9 +302,6 @@ class MSRFNAFNet(nn.Module):
                 nn.init.constant_(m.bias, 0)
     
     def forward(self, x):
-        # Store input for residual
-        inp_residual = x
-        
         # Intro convolution
         x = self.intro(x)
         
@@ -339,11 +336,8 @@ class MSRFNAFNet(nn.Module):
             else:
                 x = decoder(x)
         
-        # Ending convolution
+        # Ending convolution - predice direttamente starless
         x = self.ending(x)
-        
-        # Residual connection with input
-        x = x + inp_residual
         
         return x
 

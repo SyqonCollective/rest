@@ -32,8 +32,7 @@ class StarRemovalGUI:
         self.input_path = tk.StringVar()
         self.output_path = tk.StringVar()
         self.tile_size = tk.IntVar(value=512)
-        self.overlap = tk.IntVar(value=100)
-        self.model_type = tk.StringVar(value="msrf_nafnet_s")
+        self.overlap = tk.IntVar(value=128)  # Aumentato per migliore blending
         
         self.setup_ui()
         
@@ -63,68 +62,61 @@ class StarRemovalGUI:
                                 font=("Helvetica", 10))
         device_label.grid(row=1, column=0, columnspan=3, pady=5)
         
-        # Model type selection
-        ttk.Label(main_frame, text="Model Type:").grid(row=2, column=0, sticky=tk.W, pady=5)
-        model_combo = ttk.Combobox(main_frame, textvariable=self.model_type,
-                                   values=["msrf_nafnet_s", "msrf_nafnet_m", "msrf_nafnet_l"],
-                                   state="readonly", width=30)
-        model_combo.grid(row=2, column=1, sticky=(tk.W, tk.E), pady=5)
-        
-        # Checkpoint selection
-        ttk.Label(main_frame, text="Checkpoint:").grid(row=3, column=0, sticky=tk.W, pady=5)
+        # Checkpoint selection (model type rimosso - solo S)
+        ttk.Label(main_frame, text="Checkpoint:").grid(row=2, column=0, sticky=tk.W, pady=5)
         ttk.Entry(main_frame, textvariable=self.checkpoint_path, width=40).grid(
-            row=3, column=1, sticky=(tk.W, tk.E), pady=5)
+            row=2, column=1, sticky=(tk.W, tk.E), pady=5)
         ttk.Button(main_frame, text="Browse", command=self.browse_checkpoint).grid(
-            row=3, column=2, padx=5, pady=5)
+            row=2, column=2, padx=5, pady=5)
         
         # Load model button
         ttk.Button(main_frame, text="Load Model", command=self.load_model,
-                  style="Accent.TButton").grid(row=4, column=1, pady=10)
+                  style="Accent.TButton").grid(row=3, column=1, pady=10)
         
         # Separator
         ttk.Separator(main_frame, orient='horizontal').grid(
-            row=5, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=10)
+            row=4, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=10)
         
         # Input image selection
-        ttk.Label(main_frame, text="Input Image:").grid(row=6, column=0, sticky=tk.W, pady=5)
+        ttk.Label(main_frame, text="Input Image:").grid(row=5, column=0, sticky=tk.W, pady=5)
         ttk.Entry(main_frame, textvariable=self.input_path, width=40).grid(
-            row=6, column=1, sticky=(tk.W, tk.E), pady=5)
+            row=5, column=1, sticky=(tk.W, tk.E), pady=5)
         ttk.Button(main_frame, text="Browse", command=self.browse_input).grid(
-            row=6, column=2, padx=5, pady=5)
+            row=5, column=2, padx=5, pady=5)
         
         # Output path selection
-        ttk.Label(main_frame, text="Output Path:").grid(row=7, column=0, sticky=tk.W, pady=5)
+        ttk.Label(main_frame, text="Output Path:").grid(row=6, column=0, sticky=tk.W, pady=5)
         ttk.Entry(main_frame, textvariable=self.output_path, width=40).grid(
-            row=7, column=1, sticky=(tk.W, tk.E), pady=5)
+            row=6, column=1, sticky=(tk.W, tk.E), pady=5)
         ttk.Button(main_frame, text="Browse", command=self.browse_output).grid(
-            row=7, column=2, padx=5, pady=5)
+            row=6, column=2, padx=5, pady=5)
         
         # Tile size
-        ttk.Label(main_frame, text="Tile Size:").grid(row=8, column=0, sticky=tk.W, pady=5)
+        ttk.Label(main_frame, text="Tile Size:").grid(row=7, column=0, sticky=tk.W, pady=5)
         ttk.Spinbox(main_frame, from_=256, to=2048, increment=128,
                    textvariable=self.tile_size, width=15).grid(
-            row=8, column=1, sticky=tk.W, pady=5)
+            row=7, column=1, sticky=tk.W, pady=5)
         
-        # Overlap
-        ttk.Label(main_frame, text="Overlap:").grid(row=9, column=0, sticky=tk.W, pady=5)
-        ttk.Spinbox(main_frame, from_=32, to=256, increment=32,
+        # Overlap (aumentato per migliore blending)
+        ttk.Label(main_frame, text="Overlap (più alto = meno stacchi):").grid(row=8, column=0, sticky=tk.W, pady=5)
+        ttk.Spinbox(main_frame, from_=64, to=256, increment=32,
                    textvariable=self.overlap, width=15).grid(
-            row=9, column=1, sticky=tk.W, pady=5)
+            row=8, column=1, sticky=tk.W, pady=5)
         
         # Process button
         self.process_btn = ttk.Button(main_frame, text="Remove Stars", 
                                      command=self.process_image,
                                      style="Accent.TButton", state="disabled")
-        self.process_btn.grid(row=10, column=0, columnspan=3, pady=20)
+        self.process_btn.grid(row=9, column=0, columnspan=3, pady=20)
         
         # Progress bar
         self.progress = ttk.Progressbar(main_frame, mode='indeterminate', length=500)
-        self.progress.grid(row=11, column=0, columnspan=3, pady=10)
+        self.progress.grid(row=10, column=0, columnspan=3, pady=10)
         
         # Status label
         self.status_label = ttk.Label(main_frame, text="Ready", 
                                      font=("Helvetica", 10))
-        self.status_label.grid(row=12, column=0, columnspan=3, pady=5)
+        self.status_label.grid(row=11, column=0, columnspan=3, pady=5)
         
         # Configure grid weights
         main_frame.columnconfigure(1, weight=1)
@@ -182,14 +174,8 @@ class StarRemovalGUI:
             self.status_label.config(text="Loading model...")
             self.progress.start()
             
-            # Create model
-            model_type = self.model_type.get()
-            if model_type == "msrf_nafnet_s":
-                self.model = create_msrf_nafnet_s()
-            elif model_type == "msrf_nafnet_m":
-                self.model = create_msrf_nafnet_m()
-            elif model_type == "msrf_nafnet_l":
-                self.model = create_msrf_nafnet_l()
+            # Create model (solo S)
+            self.model = create_msrf_nafnet_s()
             
             # Load checkpoint
             checkpoint = torch.load(checkpoint_file, map_location='cpu')
@@ -430,19 +416,20 @@ class StarRemovalGUI:
     def create_weight_matrix(self, tile_size, overlap):
         """
         Create smooth weight matrix for blending
-        Uses cosine tapering at edges for seamless blending
+        Uses Hann window for ultra-smooth blending (no visible seams)
         """
         weight = torch.ones(1, 3, tile_size, tile_size)
         
         if overlap == 0:
             return weight
         
-        # Create 1D taper
+        # Create 1D Hann window taper (smoother than cosine)
         taper = torch.zeros(overlap)
         for i in range(overlap):
-            taper[i] = 0.5 * (1 - np.cos(np.pi * i / overlap))
+            # Hann window: smoother transition
+            taper[i] = 0.5 * (1 - np.cos(2 * np.pi * i / (overlap - 1)))
         
-        # Apply taper to edges
+        # Apply taper to all four edges with multiplicative blending
         # Top edge
         weight[:, :, :overlap, :] *= taper.view(1, 1, overlap, 1)
         # Bottom edge

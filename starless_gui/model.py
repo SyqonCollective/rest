@@ -225,7 +225,6 @@ class MSRFNAFNet(nn.Module):
             chan = chan * 2
     
     def forward(self, x):
-        inp_residual = x
         x = self.intro(x)
         
         encs = []
@@ -246,8 +245,8 @@ class MSRFNAFNet(nn.Module):
             x = fusion(torch.cat([x, enc_skip], dim=1))
             x = decoder(x)
         
+        # Predice direttamente starless (no residual)
         x = self.ending(x)
-        x = x + inp_residual
         
         return x
 
