@@ -14,7 +14,7 @@ data:
 # Training configuration
 training:
   # Basic settings
-  batch_size: 4  # Ridotto per 512x512 patches
+  batch_size: 6  # Ridotto per 512x512 patches
   epochs: 500
   
   # Optimization
@@ -29,7 +29,7 @@ training:
   # Intervals
   log_interval: 50  # Log every N steps
   val_interval: 1  # Validate every N epochs
-  save_interval: 10  # Save checkpoint every N epochs
+  save_interval: 1  # Save checkpoint every epoch
 
 # Optimizer configuration
 optimizer:
