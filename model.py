@@ -238,9 +238,12 @@ class MSRFNAFNet(nn.Module):
         width=32,
         middle_blk_num=12,
         enc_blk_nums=[2, 2, 4, 8],
-        dec_blk_nums=[2, 2, 2, 2]
+        dec_blk_nums=[2, 2, 2, 2],
+        use_gradient_checkpointing=False
     ):
         super().__init__()
+        
+        self.use_gradient_checkpointing = use_gradient_checkpointing
         
         self.intro = nn.Conv2d(img_channels, width, 3, padding=1)
         self.ending = nn.Conv2d(width, img_channels, 3, padding=1)
@@ -308,13 +311,19 @@ class MSRFNAFNet(nn.Module):
         # Encoder with skip connections
         encs = []
         for encoder, down in zip(self.encoders, self.downs):
-            x = encoder(x)
+            if self.use_gradient_checkpointing and self.training:
+                x = torch.utils.checkpoint.checkpoint(encoder, x, use_reentrant=False)
+            else:
+                x = encoder(x)
             encs.append(x)
             x = down(x)
         
         # Middle processing with context aggregation
         for i, blk in enumerate(self.middle_blks):
-            x = blk(x)
+            if self.use_gradient_checkpointing and self.training:
+                x = torch.utils.checkpoint.checkpoint(blk, x, use_reentrant=False)
+            else:
+                x = blk(x)
             # Apply context aggregation every 4 blocks
             if i % 4 == 0 and i // 4 < len(self.context_agg):
                 x = x + self.context_agg[i // 4](x)
@@ -325,7 +334,10 @@ class MSRFNAFNet(nn.Module):
         ):
             x = up(x)
             x = fusion(torch.cat([x, enc_skip], dim=1))
-            x = decoder(x)
+            if self.use_gradient_checkpointing and self.training:
+                x = torch.utils.checkpoint.checkpoint(decoder, x, use_reentrant=False)
+            else:
+                x = decoder(x)
         
         # Ending convolution
         x = self.ending(x)
@@ -336,36 +348,39 @@ class MSRFNAFNet(nn.Module):
         return x
 
 
-def create_msrf_nafnet_s():
+def create_msrf_nafnet_s(use_gradient_checkpointing=False):
     """Create MSRF-NAFNet-S model (optimized for RTX 5090)"""
     return MSRFNAFNet(
         img_channels=3,
         width=32,
         middle_blk_num=12,
         enc_blk_nums=[2, 2, 4, 8],
-        dec_blk_nums=[2, 2, 2, 2]
+        dec_blk_nums=[2, 2, 2, 2],
+        use_gradient_checkpointing=use_gradient_checkpointing
     )
 
 
-def create_msrf_nafnet_m():
+def create_msrf_nafnet_m(use_gradient_checkpointing=False):
     """Create MSRF-NAFNet-M model (higher capacity)"""
     return MSRFNAFNet(
         img_channels=3,
         width=48,
         middle_blk_num=16,
         enc_blk_nums=[2, 3, 4, 8],
-        dec_blk_nums=[2, 3, 4, 2]
+        dec_blk_nums=[2, 3, 4, 2],
+        use_gradient_checkpointing=use_gradient_checkpointing
     )
 
 
-def create_msrf_nafnet_l():
+def create_msrf_nafnet_l(use_gradient_checkpointing=False):
     """Create MSRF-NAFNet-L model (maximum quality)"""
     return MSRFNAFNet(
         img_channels=3,
         width=64,
         middle_blk_num=20,
         enc_blk_nums=[3, 3, 6, 12],
-        dec_blk_nums=[3, 3, 6, 3]
+        dec_blk_nums=[3, 3, 6, 3],
+        use_gradient_checkpointing=use_gradient_checkpointing
     )
 
 

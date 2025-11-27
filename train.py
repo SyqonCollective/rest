@@ -85,13 +85,14 @@ class Trainer:
     def build_model(self):
         """Build model architecture"""
         model_type = self.config['model']['type']
+        use_grad_checkpoint = self.config['training'].get('use_gradient_checkpointing', False)
         
         if model_type == 'msrf_nafnet_s':
-            self.model = create_msrf_nafnet_s()
+            self.model = create_msrf_nafnet_s(use_gradient_checkpointing=use_grad_checkpoint)
         elif model_type == 'msrf_nafnet_m':
-            self.model = create_msrf_nafnet_m()
+            self.model = create_msrf_nafnet_m(use_gradient_checkpointing=use_grad_checkpoint)
         elif model_type == 'msrf_nafnet_l':
-            self.model = create_msrf_nafnet_l()
+            self.model = create_msrf_nafnet_l(use_gradient_checkpointing=use_grad_checkpoint)
         else:
             raise ValueError(f"Unknown model type: {model_type}")
         
@@ -179,6 +180,7 @@ class Trainer:
     def train_epoch(self, epoch):
         """Train for one epoch"""
         self.model.train()
+        self.optimizer.zero_grad(set_to_none=True)  # Libera memoria
         
         losses = AverageMeter()
         psnr_meter = AverageMeter()

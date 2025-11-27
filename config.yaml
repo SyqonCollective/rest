@@ -14,22 +14,23 @@ data:
 # Training configuration
 training:
   # Basic settings
-  batch_size: 2  # Ridotto per 512x512 patches
+  batch_size: 8  # Ottimizzato per RTX 5090 con gradient checkpointing
   epochs: 500
   
   # Optimization
   use_amp: false  # Disabled - problemi con mixed types
-  gradient_accumulation_steps: 4  # Simula batch_size=16
+  gradient_accumulation_steps: 2  # Simula batch_size=16
   compile_model: false  # Disabled - torch.compile ha conflitti con AMP
+  use_gradient_checkpointing: true  # Riduce VRAM usage drasticamente
   
   # EMA (Exponential Moving Average)
   use_ema: true
   ema_decay: 0.9999
   
   # Intervals
-  log_interval: 50  # Log every N steps
+  log_interval: 20  # Log every N steps (ridotto per feedback veloce)
   val_interval: 1  # Validate every N epochs
-  save_interval: 1  # Save checkpoint every epoch
+  save_interval: 5  # Save checkpoint every 5 epochs (ridotto I/O)
 
 # Optimizer configuration
 optimizer:
@@ -51,10 +52,10 @@ scheduler:
 # Loss function weights
 loss:
   l1_weight: 1.0  # Pixel-wise L1 loss
-  perceptual_weight: 1.0  # VGG perceptual loss (critical for texture)
-  texture_weight: 0.5  # Gram matrix texture loss (prevents blob artifacts)
-  edge_weight: 0.3  # Edge preservation loss
-  frequency_weight: 0.2  # Frequency domain loss
+  perceptual_weight: 0.5  # VGG perceptual loss (ridotto per velocità)
+  texture_weight: 0.3  # Gram matrix texture loss (prevents blob artifacts)
+  edge_weight: 0.2  # Edge preservation loss
+  frequency_weight: 0.1  # Frequency domain loss
 
 # Output directories
 output_dir: "./output"  # All outputs will be saved here

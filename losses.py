@@ -14,12 +14,13 @@ class PerceptualLoss(nn.Module):
     """
     Perceptual loss using VGG19 features
     Critical for texture quality and avoiding blob artifacts
+    Optimized: features computed in eval mode and cached
     """
     def __init__(self, layers=['relu1_2', 'relu2_2', 'relu3_4', 'relu4_4'], weights=[1.0, 1.0, 1.0, 1.0]):
         super().__init__()
         
         # Load pretrained VGG19
-        vgg = models.vgg19(pretrained=True).features
+        vgg = models.vgg19(pretrained=True).features.eval()  # Always in eval mode
         self.layers = layers
         self.weights = weights
         
@@ -39,7 +40,7 @@ class PerceptualLoss(nn.Module):
                 extractor = nn.Sequential()
                 for i in range(layer_map[name] + 1):
                     extractor.add_module(str(i), vgg[i])
-                self.feature_extractors[name] = extractor
+                self.feature_extractors[name] = extractor.eval()  # Force eval mode
         
         # Freeze parameters
         for param in self.parameters():
@@ -58,11 +59,18 @@ class PerceptualLoss(nn.Module):
         pred = self.normalize(pred)
         target = self.normalize(target)
         
-        # Calculate loss for each layer
+        # Calculate loss for each layer with no_grad for efficiency
         loss = 0.0
+        with torch.no_grad():
+            # Extract target features once
+            target_feats = {}
+            for layer_name in self.layers:
+                target_feats[layer_name] = self.feature_extractors[layer_name](target).detach()
+        
+        # Only compute gradients for predictions
         for layer_name, weight in zip(self.layers, self.weights):
             pred_feat = self.feature_extractors[layer_name](pred)
-            target_feat = self.feature_extractors[layer_name](target)
+            target_feat = target_feats[layer_name]
             loss += weight * F.l1_loss(pred_feat, target_feat)
         
         return loss

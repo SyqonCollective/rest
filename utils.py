@@ -163,20 +163,22 @@ def calculate_ssim(pred, target, window_size=11, max_val=1.0):
     pred = pred.clamp(0, max_val)
     target = target.clamp(0, max_val)
     
-    # Create window
+    # Create window - expand for each channel
+    channels = pred.shape[1]
     window = torch.ones(1, 1, window_size, window_size) / (window_size ** 2)
     window = window.to(pred.device)
+    window = window.repeat(channels, 1, 1, 1)  # [C, 1, H, W] for grouped convolution
     
-    mu1 = torch.nn.functional.conv2d(pred, window, padding=window_size//2, groups=pred.shape[1])
-    mu2 = torch.nn.functional.conv2d(target, window, padding=window_size//2, groups=target.shape[1])
+    mu1 = torch.nn.functional.conv2d(pred, window, padding=window_size//2, groups=channels)
+    mu2 = torch.nn.functional.conv2d(target, window, padding=window_size//2, groups=channels)
     
     mu1_sq = mu1.pow(2)
     mu2_sq = mu2.pow(2)
     mu1_mu2 = mu1 * mu2
     
-    sigma1_sq = torch.nn.functional.conv2d(pred * pred, window, padding=window_size//2, groups=pred.shape[1]) - mu1_sq
-    sigma2_sq = torch.nn.functional.conv2d(target * target, window, padding=window_size//2, groups=target.shape[1]) - mu2_sq
-    sigma12 = torch.nn.functional.conv2d(pred * target, window, padding=window_size//2, groups=pred.shape[1]) - mu1_mu2
+    sigma1_sq = torch.nn.functional.conv2d(pred * pred, window, padding=window_size//2, groups=channels) - mu1_sq
+    sigma2_sq = torch.nn.functional.conv2d(target * target, window, padding=window_size//2, groups=channels) - mu2_sq
+    sigma12 = torch.nn.functional.conv2d(pred * target, window, padding=window_size//2, groups=channels) - mu1_mu2
     
     ssim_map = ((2 * mu1_mu2 + C1) * (2 * sigma12 + C2)) / ((mu1_sq + mu2_sq + C1) * (sigma1_sq + sigma2_sq + C2))
     
