@@ -16,7 +16,7 @@ import os
 
 # Import model architecture (copy from main project)
 sys.path.insert(0, str(Path(__file__).parent))
-from model import create_msrf_nafnet_s, create_msrf_nafnet_m, create_msrf_nafnet_l
+from model import create_model_s
 
 
 class StarRemovalGUI:
@@ -174,8 +174,8 @@ class StarRemovalGUI:
             self.status_label.config(text="Loading model...")
             self.progress.start()
             
-            # Create model (solo S)
-            self.model = create_msrf_nafnet_s()
+            # Create model (Restormer-SLMR Small only)
+            self.model = create_model_s()
             
             # Load checkpoint
             checkpoint = torch.load(checkpoint_file, map_location='cpu')

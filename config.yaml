@@ -1,9 +1,10 @@
 # MSRF-NAFNet Configuration
 # Optimized for RTX 5090 - Star Removal with Genuine Texture Reconstruction
+# Now using Restormer-SLMR: 3x faster, better texture quality
 
 # Model configuration
 model:
-  type: restormer_slmr_s  # Options: restormer_slmr_s, restormer_slmr_m, msrf_nafnet_s
+  type: s  # Options: s (small), m (medium) - Restormer-SLMR only
 
 # Data configuration
 data:
