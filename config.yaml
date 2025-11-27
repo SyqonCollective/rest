@@ -54,10 +54,10 @@ scheduler:
 # Loss function weights
 loss:
   l1_weight: 1.0  # Pixel-wise L1 loss
-  perceptual_weight: 0.5  # VGG perceptual loss (ridotto per velocità)
-  texture_weight: 0.3  # Gram matrix texture loss (prevents blob artifacts)
-  edge_weight: 0.2  # Edge preservation loss
-  frequency_weight: 0.1  # Frequency domain loss
+  perceptual_weight: 0.05  # VGG perceptual loss (ridotto drasticamente - esplode all'inizio)
+  texture_weight: 0.05  # Gram matrix texture loss
+  edge_weight: 0.05  # Edge preservation loss
+  frequency_weight: 0.02  # Frequency domain loss
 
 # Output directories
 output_dir: "./output"  # All outputs will be saved here
