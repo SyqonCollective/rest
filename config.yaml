@@ -20,7 +20,7 @@ training:
   # Optimization
   use_amp: true  # Mixed precision for 2x speedup on RTX 5090
   gradient_accumulation_steps: 1  # Increase if OOM (simulates larger batch)
-  compile_model: true  # PyTorch 2.0+ compilation for massive speedup
+  compile_model: false  # Disabled - torch.compile ha conflitti con AMP
   
   # EMA (Exponential Moving Average)
   use_ema: true
