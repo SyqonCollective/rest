@@ -275,9 +275,12 @@ class RestormerSLMR(nn.Module):
         enc_blks=[2, 3, 4],
         middle_blks=6,
         dec_blks=[2, 2, 2],
-        window_size=8
+        window_size=8,
+        use_gradient_checkpointing=False
     ):
         super().__init__()
+        
+        self.use_gradient_checkpointing = use_gradient_checkpointing
         
         # Input projection
         self.intro = nn.Conv2d(img_channels, width, 3, padding=1)
@@ -334,12 +337,18 @@ class RestormerSLMR(nn.Module):
         # Encoder
         encs = []
         for encoder, down in zip(self.encoders, self.downs):
-            x = encoder(x)
+            if self.use_gradient_checkpointing and self.training:
+                x = torch.utils.checkpoint.checkpoint(encoder, x, use_reentrant=False)
+            else:
+                x = encoder(x)
             encs.append(x)
             x = down(x)
         
         # Bottleneck
-        x = self.middle_blks(x)
+        if self.use_gradient_checkpointing and self.training:
+            x = torch.utils.checkpoint.checkpoint(self.middle_blks, x, use_reentrant=False)
+        else:
+            x = self.middle_blks(x)
         
         # Decoder
         for decoder, up, enc_skip, fusion in zip(
@@ -347,7 +356,10 @@ class RestormerSLMR(nn.Module):
         ):
             x = up(x)
             x = fusion(torch.cat([x, enc_skip], dim=1))
-            x = decoder(x)
+            if self.use_gradient_checkpointing and self.training:
+                x = torch.utils.checkpoint.checkpoint(decoder, x, use_reentrant=False)
+            else:
+                x = decoder(x)
         
         # Output - predice direttamente starless
         x = self.ending(x)
@@ -358,14 +370,14 @@ class RestormerSLMR(nn.Module):
 def create_model_s(use_gradient_checkpointing=False):
     """
     Restormer-SLMR Small - modello principale
-    ~8M params, ottimizzato per PC normali e RTX 5090
+    ~4M params, ottimizzato per RTX 5090 con batch_size 8
     """
     return RestormerSLMR(
         img_channels=3,
-        width=32,
-        enc_blks=[2, 3, 4],
-        middle_blks=6,
-        dec_blks=[2, 2, 2],
+        width=24,  # Ridotto da 32
+        enc_blks=[1, 2, 2],  # Ridotto da [2, 3, 4]
+        middle_blks=4,  # Ridotto da 6
+        dec_blks=[1, 1, 1],  # Ridotto da [2, 2, 2]
         window_size=8
     )
 
