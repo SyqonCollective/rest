@@ -19,33 +19,30 @@ class StarDataset(Dataset):
         if not os.path.isdir(split_dir):
             raise FileNotFoundError(f"Split directory not found: {split_dir}")
 
+        input_dir = os.path.join(split_dir, "input")
+        target_dir = os.path.join(split_dir, "target")
+        if not os.path.isdir(input_dir) or not os.path.isdir(target_dir):
+            raise FileNotFoundError(f"Expected subdirectories 'input' and 'target' inside {split_dir}")
+
         allowed_ext = {".png", ".jpg", ".jpeg", ".webp", ".tif", ".tiff", ".bmp"}
-        inputs = {}
-        targets = {}
 
-        for fname in os.listdir(split_dir):
-            stem, ext = os.path.splitext(fname)
-            if ext.lower() not in allowed_ext:
-                continue
-            stem_lower = stem.lower()
-            path = os.path.join(split_dir, fname)
-            if stem_lower.endswith("_input"):
-                base = stem_lower[: -len("_input")]
-                inputs[base] = path
-            elif stem_lower.endswith("_target"):
-                base = stem_lower[: -len("_target")]
-                targets[base] = path
+        def collect(dir_path):
+            mapping = {}
+            for fname in os.listdir(dir_path):
+                stem, ext = os.path.splitext(fname)
+                if ext.lower() not in allowed_ext:
+                    continue
+                mapping[stem.lower()] = os.path.join(dir_path, fname)
+            return mapping
 
-        pairs = []
-        for base, input_path in inputs.items():
-            if base in targets:
-                pairs.append((input_path, targets[base]))
+        input_map = collect(input_dir)
+        target_map = collect(target_dir)
+
+        common = sorted(set(input_map.keys()) & set(target_map.keys()))
+        pairs = [(input_map[k], target_map[k]) for k in common]
 
         if not pairs:
-            raise RuntimeError(
-                f"No input/target pairs found in {split_dir}. Expected files like <name>_input.png and <name>_target.png"
-            )
-        pairs.sort()
+            raise RuntimeError(f"No matching input/target pairs found in {input_dir} and {target_dir}")
         return pairs
 
     def __len__(self):
