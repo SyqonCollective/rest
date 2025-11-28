@@ -1,264 +1,207 @@
-"""
-Inference script for MSRF-NAFNet
-Process single images or entire directories
-"""
-
 import torch
-import torch.nn.functional as F
-from pathlib import Path
-import argparse
+import torchvision.transforms as transforms
 from PIL import Image
 import numpy as np
-from tqdm import tqdm
-import yaml
+from pathlib import Path
+import argparse
 
-from model import create_msrf_nafnet_s, create_msrf_nafnet_m, create_msrf_nafnet_l
-from utils import load_checkpoint
+from model import StarRemovalNet
 
 
-class Inferencer:
-    """High-performance inference engine"""
+def hann_window_2d(h, w):
+    """
+    Create 2D Hann window for boundary-aware tile blending
     
-    def __init__(self, model_path, config_path=None, device='cuda', use_amp=True):
+    Prevents:
+    - Visible seams between tiles
+    - Structural differences at tile boundaries
+    - Micro-stitching artifacts
+    """
+    hann_h = torch.hann_window(h, periodic=False)
+    hann_w = torch.hann_window(w, periodic=False)
+    window_2d = hann_h.unsqueeze(1) * hann_w.unsqueeze(0)
+    return window_2d
+
+
+class StarRemover:
+    """Inference class for star removal"""
+    def __init__(self, checkpoint_path, device='cuda'):
         self.device = torch.device(device if torch.cuda.is_available() else 'cpu')
-        self.use_amp = use_amp and (device == 'cuda')
         
-        # Load config if provided
-        if config_path:
-            with open(config_path, 'r') as f:
-                config = yaml.safe_load(f)
-            model_type = config['model']['type']
-        else:
-            # Default to small model
-            model_type = 'msrf_nafnet_s'
-        
-        # Create model
-        if model_type == 'msrf_nafnet_s':
-            self.model = create_msrf_nafnet_s()
-        elif model_type == 'msrf_nafnet_m':
-            self.model = create_msrf_nafnet_m()
-        elif model_type == 'msrf_nafnet_l':
-            self.model = create_msrf_nafnet_l()
+        # Load model
+        self.model = StarRemovalNet(in_channels=3, base_channels=64, num_blocks=6)
         
         # Load checkpoint
-        checkpoint = torch.load(model_path, map_location='cpu')
-        
-        # Handle different checkpoint formats
-        if 'model_state_dict' in checkpoint:
-            state_dict = checkpoint['model_state_dict']
-        elif 'ema_state_dict' in checkpoint:
-            # Use EMA weights if available
-            state_dict = checkpoint['ema_state_dict']
-        else:
-            state_dict = checkpoint
-        
-        self.model.load_state_dict(state_dict)
-        self.model = self.model.to(self.device)
+        checkpoint = torch.load(checkpoint_path, map_location=self.device)
+        self.model.load_state_dict(checkpoint['model_state_dict'])
+        self.model.to(self.device)
         self.model.eval()
         
-        print(f"Model loaded from {model_path}")
-        print(f"Device: {self.device}")
-        print(f"Mixed precision: {self.use_amp}")
-    
-    def load_image(self, path):
-        """Load image from path"""
-        img = Image.open(path).convert('RGB')
-        img_np = np.array(img).astype(np.float32) / 255.0
-        img_tensor = torch.from_numpy(img_np).permute(2, 0, 1).unsqueeze(0)
-        return img_tensor, img
-    
-    def save_image(self, tensor, path):
-        """Save tensor as image"""
-        img_np = tensor.squeeze(0).permute(1, 2, 0).cpu().numpy()
-        img_np = np.clip(img_np * 255.0, 0, 255).astype(np.uint8)
-        img = Image.fromarray(img_np)
-        img.save(path)
-    
-    def pad_to_multiple(self, img, multiple=32):
-        """Pad image to be divisible by multiple"""
-        _, _, h, w = img.shape
-        pad_h = (multiple - h % multiple) % multiple
-        pad_w = (multiple - w % multiple) % multiple
+        print(f"Loaded model from {checkpoint_path}")
+        print(f"Best validation loss: {checkpoint.get('best_val_loss', 'N/A')}")
         
-        if pad_h > 0 or pad_w > 0:
-            img = F.pad(img, (0, pad_w, 0, pad_h), mode='reflect')
+    @torch.no_grad()
+    def remove_stars(self, input_image_path, output_path=None, tile_size=None, overlap=64):
+        """
+        Remove stars from an image
         
-        return img, (h, w)
-    
-    def unpad(self, img, original_size):
-        """Remove padding"""
-        h, w = original_size
-        return img[:, :, :h, :w]
+        Args:
+            input_image_path: Path to input image
+            output_path: Path to save starless image (optional)
+            tile_size: Process in tiles of this size (for large images). None = full image
+            overlap: Overlap between tiles in pixels (for smooth blending)
+        
+        Returns:
+            starless_image: PIL Image
+        """
+        # Load image
+        input_img = Image.open(input_image_path).convert('RGB')
+        original_size = input_img.size
+        
+        # Convert to tensor
+        transform = transforms.ToTensor()
+        input_tensor = transform(input_img).unsqueeze(0).to(self.device)
+        
+        # Process full image or with tiling
+        if tile_size is None or (input_tensor.shape[2] <= tile_size and input_tensor.shape[3] <= tile_size):
+            # Process full image
+            with torch.cuda.amp.autocast():
+                output_tensor = self.model(input_tensor)
+        else:
+            # Process with tiling and Hann window blending
+            output_tensor = self._process_with_tiles(input_tensor, tile_size, overlap)
+        
+        # Convert back to PIL image
+        output_tensor = output_tensor.squeeze(0).cpu()
+        output_tensor = torch.clamp(output_tensor, 0, 1)
+        
+        # Convert to numpy
+        output_np = output_tensor.permute(1, 2, 0).numpy()
+        output_np = (output_np * 255).astype(np.uint8)
+        
+        starless_image = Image.fromarray(output_np)
+        
+        # Save if path provided
+        if output_path is not None:
+            starless_image.save(output_path)
+            print(f"Saved starless image to {output_path}")
+        
+        return starless_image
     
     @torch.no_grad()
-    def process_image(self, img_tensor):
-        """Process single image"""
-        # Pad to multiple of 32
-        img_padded, original_size = self.pad_to_multiple(img_tensor)
-        img_padded = img_padded.to(self.device)
+    def _process_with_tiles(self, input_tensor, tile_size, overlap):
+        """
+        Process large image with overlapping tiles and Hann window blending
         
-        # Inference with mixed precision
-        if self.use_amp:
-            with torch.amp.autocast('cuda'):
-                output = self.model(img_padded)
-        else:
-            output = self.model(img_padded)
+        Ensures seamless tile fusion with no visible boundaries.
+        """
+        b, c, h, w = input_tensor.shape
+        stride = tile_size - overlap
         
-        # Remove padding
-        output = self.unpad(output, original_size)
+        # Create output accumulator
+        output_acc = torch.zeros_like(input_tensor)
+        weight_acc = torch.zeros((1, 1, h, w), device=input_tensor.device)
         
-        # Clamp to valid range
-        output = torch.clamp(output, 0, 1)
+        # Create Hann window for blending
+        hann = hann_window_2d(tile_size, tile_size).to(input_tensor.device)
+        hann = hann.unsqueeze(0).unsqueeze(0)  # [1, 1, H, W]
         
-        return output
+        # Process tiles
+        for y in range(0, h, stride):
+            for x in range(0, w, stride):
+                # Get tile boundaries
+                y_end = min(y + tile_size, h)
+                x_end = min(x + tile_size, w)
+                
+                # Extract tile
+                tile = input_tensor[:, :, y:y_end, x:x_end]
+                
+                # Pad if needed
+                pad_h = tile_size - tile.shape[2]
+                pad_w = tile_size - tile.shape[3]
+                if pad_h > 0 or pad_w > 0:
+                    tile = torch.nn.functional.pad(tile, (0, pad_w, 0, pad_h), mode='reflect')
+                
+                # Process tile
+                with torch.cuda.amp.autocast():
+                    tile_output = self.model(tile)
+                
+                # Remove padding
+                if pad_h > 0 or pad_w > 0:
+                    tile_output = tile_output[:, :, :tile_size-pad_h, :tile_size-pad_w]
+                
+                # Get window for this tile
+                tile_h, tile_w = tile_output.shape[2], tile_output.shape[3]
+                window = hann[:, :, :tile_h, :tile_w]
+                
+                # Accumulate with weighted blending
+                output_acc[:, :, y:y_end, x:x_end] += tile_output * window
+                weight_acc[:, :, y:y_end, x:x_end] += window
+        
+        # Normalize by accumulated weights
+        output_tensor = output_acc / (weight_acc + 1e-8)
+        
+        return output_tensor
     
-    def process_file(self, input_path, output_path):
-        """Process single file"""
-        img_tensor, original_img = self.load_image(input_path)
-        output = self.process_image(img_tensor)
-        self.save_image(output, output_path)
-    
-    def process_directory(self, input_dir, output_dir, recursive=False):
-        """Process entire directory"""
-        input_dir = Path(input_dir)
-        output_dir = Path(output_dir)
-        output_dir.mkdir(parents=True, exist_ok=True)
+    @torch.no_grad()
+    def batch_process(self, input_dir, output_dir):
+        """
+        Process all images in a directory
         
-        # Get all image files
-        extensions = ['.png', '.jpg', '.jpeg', '.tif', '.tiff', '.bmp']
+        Args:
+            input_dir: Directory with input images
+            output_dir: Directory to save starless images
+        """
+        input_path = Path(input_dir)
+        output_path = Path(output_dir)
+        output_path.mkdir(exist_ok=True, parents=True)
         
-        if recursive:
-            image_files = []
-            for ext in extensions:
-                image_files.extend(input_dir.rglob(f'*{ext}'))
-        else:
-            image_files = []
-            for ext in extensions:
-                image_files.extend(input_dir.glob(f'*{ext}'))
+        # Find all images
+        image_extensions = ['*.png', '*.jpg', '*.jpeg', '*.tiff', '*.bmp']
+        image_files = []
+        for ext in image_extensions:
+            image_files.extend(input_path.glob(ext))
+            image_files.extend(input_path.glob(ext.upper()))
         
         print(f"Found {len(image_files)} images to process")
         
         # Process each image
-        for img_path in tqdm(image_files, desc="Processing images"):
-            # Determine output path
-            if recursive:
-                rel_path = img_path.relative_to(input_dir)
-                out_path = output_dir / rel_path
-                out_path.parent.mkdir(parents=True, exist_ok=True)
-            else:
-                out_path = output_dir / img_path.name
-            
-            # Process
-            try:
-                self.process_file(img_path, out_path)
-            except Exception as e:
-                print(f"Error processing {img_path}: {e}")
-    
-    def process_with_tiles(self, img_tensor, tile_size=512, overlap=32):
-        """
-        Process large image with tiling for better quality and memory efficiency
-        Useful for very large astronomical images
-        """
-        _, _, h, w = img_tensor.shape
+        for img_file in image_files:
+            print(f"Processing {img_file.name}...")
+            output_file = output_path / img_file.name
+            self.remove_stars(img_file, output_file)
         
-        # If image is small enough, process normally
-        if h <= tile_size and w <= tile_size:
-            return self.process_image(img_tensor)
-        
-        # Create output tensor
-        output = torch.zeros_like(img_tensor)
-        weight = torch.zeros_like(img_tensor)
-        
-        # Calculate stride
-        stride = tile_size - overlap
-        
-        # Process tiles
-        for i in range(0, h, stride):
-            for j in range(0, w, stride):
-                # Extract tile
-                i_end = min(i + tile_size, h)
-                j_end = min(j + tile_size, w)
-                tile = img_tensor[:, :, i:i_end, j:j_end]
-                
-                # Pad if necessary
-                tile_h, tile_w = tile.shape[2:]
-                if tile_h < tile_size or tile_w < tile_size:
-                    pad_h = tile_size - tile_h
-                    pad_w = tile_size - tile_w
-                    tile = F.pad(tile, (0, pad_w, 0, pad_h), mode='reflect')
-                
-                # Process tile
-                tile_output = self.process_image(tile)
-                
-                # Remove padding
-                tile_output = tile_output[:, :, :tile_h, :tile_w]
-                
-                # Add to output with weights
-                output[:, :, i:i_end, j:j_end] += tile_output.cpu()
-                weight[:, :, i:i_end, j:j_end] += 1
-        
-        # Normalize by weights
-        output = output / weight.clamp(min=1)
-        
-        return output
+        print(f"\nBatch processing complete! Saved to {output_path}")
 
 
 def main():
-    parser = argparse.ArgumentParser(description='MSRF-NAFNet Inference')
-    parser.add_argument('--model', type=str, required=True, help='Path to model checkpoint')
-    parser.add_argument('--config', type=str, default=None, help='Path to config file')
-    parser.add_argument('--input', type=str, required=True, help='Input image or directory')
-    parser.add_argument('--output', type=str, required=True, help='Output image or directory')
-    parser.add_argument('--device', type=str, default='cuda', choices=['cuda', 'cpu'])
-    parser.add_argument('--amp', action='store_true', help='Use mixed precision')
-    parser.add_argument('--recursive', action='store_true', help='Process directory recursively')
-    parser.add_argument('--tile-size', type=int, default=0, help='Use tiling for large images (0=disable)')
-    parser.add_argument('--tile-overlap', type=int, default=32, help='Overlap between tiles')
+    parser = argparse.ArgumentParser(description='Star Removal Inference')
+    parser.add_argument('--checkpoint', type=str, required=True,
+                       help='Path to model checkpoint')
+    parser.add_argument('--input', type=str, required=True,
+                       help='Input image or directory')
+    parser.add_argument('--output', type=str, required=True,
+                       help='Output path or directory')
+    parser.add_argument('--batch', action='store_true',
+                       help='Batch process directory')
+    parser.add_argument('--tile-size', type=int, default=None,
+                       help='Tile size for large images (None = full image)')
+    parser.add_argument('--overlap', type=int, default=64,
+                       help='Overlap between tiles for smooth blending')
+    parser.add_argument('--device', type=str, default='cuda',
+                       help='Device to run inference on')
     
     args = parser.parse_args()
     
-    # Create inferencer
-    inferencer = Inferencer(
-        model_path=args.model,
-        config_path=args.config,
-        device=args.device,
-        use_amp=args.amp
-    )
+    # Create remover
+    remover = StarRemover(args.checkpoint, device=args.device)
     
-    # Process input
-    input_path = Path(args.input)
-    output_path = Path(args.output)
-    
-    if input_path.is_file():
-        # Single file
-        print(f"Processing single image: {input_path}")
-        
-        if args.tile_size > 0:
-            img_tensor, _ = inferencer.load_image(input_path)
-            output = inferencer.process_with_tiles(
-                img_tensor,
-                tile_size=args.tile_size,
-                overlap=args.tile_overlap
-            )
-            inferencer.save_image(output, output_path)
-        else:
-            inferencer.process_file(input_path, output_path)
-        
-        print(f"Saved to: {output_path}")
-    
-    elif input_path.is_dir():
-        # Directory
-        print(f"Processing directory: {input_path}")
-        inferencer.process_directory(
-            input_dir=input_path,
-            output_dir=output_path,
-            recursive=args.recursive
-        )
-        print(f"Results saved to: {output_path}")
-    
+    # Process
+    if args.batch:
+        remover.batch_process(args.input, args.output)
     else:
-        print(f"Error: {input_path} not found")
+        remover.remove_stars(args.input, args.output, tile_size=args.tile_size, overlap=args.overlap)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

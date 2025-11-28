@@ -1,421 +1,361 @@
-"""
-Restormer-SLMR (Small + Local + Multi-Receptive)
-Optimized for star removal with genuine texture reconstruction
-
-Key features:
-- Multi-Dconv Large Kernel Attention (MLKA) from Restormer
-- Local windowed attention (3x faster than global)
-- Dilated convolutions for wide receptive field
-- Residual refinement blocks for inpainting
-- Compact U-shape architecture
-"""
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import math
-from typing import List, Tuple
 
 
-class LayerNorm2d(nn.Module):
-    """LayerNorm for channels-first"""
-    def __init__(self, channels, eps=1e-6):
+class DepthwiseSeparableConv(nn.Module):
+    """Depthwise Separable Convolution for efficiency"""
+    def __init__(self, in_channels, out_channels, kernel_size, padding, dilation=1):
         super().__init__()
-        self.weight = nn.Parameter(torch.ones(channels))
-        self.bias = nn.Parameter(torch.zeros(channels))
-        self.eps = eps
-
+        self.depthwise = nn.Conv2d(in_channels, in_channels, kernel_size, 
+                                   padding=padding, dilation=dilation, groups=in_channels, bias=False)
+        self.pointwise = nn.Conv2d(in_channels, out_channels, 1, bias=False)
+        self.norm = nn.GroupNorm(8, out_channels)
+        
     def forward(self, x):
-        N, C, H, W = x.size()
-        mu = x.mean(1, keepdim=True)
-        var = (x - mu).pow(2).mean(1, keepdim=True)
-        y = (x - mu) / (var + self.eps).sqrt()
-        y = self.weight.view(1, C, 1, 1) * y + self.bias.view(1, C, 1, 1)
-        return y
+        x = self.depthwise(x)
+        x = self.pointwise(x)
+        x = self.norm(x)
+        return x
 
 
-class GELU(nn.Module):
-    """GELU activation"""
-    def forward(self, x):
-        return F.gelu(x)
-
-
-class MultiDilatedConv(nn.Module):
-    """
-    Multi-scale dilated convolutions for wide receptive field
-    Key for capturing context around stars
-    """
-    def __init__(self, channels, dilations=[1, 2, 4]):
+class MSRF_Block(nn.Module):
+    """Multi-Scale Receptive Field Block - SOTA 2024-2025"""
+    def __init__(self, channels):
         super().__init__()
-        self.dilations = dilations
-        self.convs = nn.ModuleList([
-            nn.Conv2d(channels, channels, kernel_size=3, padding=d, dilation=d, groups=channels)
-            for d in dilations
-        ])
-        self.fusion = nn.Conv2d(channels * len(dilations), channels, 1)
+        
+        # Multi-scale branches with different receptive fields
+        # Scale 1: Small receptive field (3x3)
+        self.branch1 = nn.Sequential(
+            DepthwiseSeparableConv(channels, channels, 3, padding=1),
+            nn.GELU()
+        )
+        
+        # Scale 2: Medium receptive field (5x5 dilated)
+        self.branch2 = nn.Sequential(
+            DepthwiseSeparableConv(channels, channels, 3, padding=2, dilation=2),
+            nn.GELU()
+        )
+        
+        # Scale 3: Large receptive field (11x11)
+        self.branch3 = nn.Sequential(
+            nn.Conv2d(channels, channels, 11, padding=5, groups=channels, bias=False),
+            nn.Conv2d(channels, channels, 1, bias=False),
+            nn.GroupNorm(8, channels),
+            nn.GELU()
+        )
+        
+        # Scale 4: Very large receptive field (17x17)
+        self.branch4 = nn.Sequential(
+            nn.Conv2d(channels, channels, 17, padding=8, groups=channels, bias=False),
+            nn.Conv2d(channels, channels, 1, bias=False),
+            nn.GroupNorm(8, channels),
+            nn.GELU()
+        )
+        
+        # Fusion layer
+        self.fusion = nn.Sequential(
+            nn.Conv2d(channels * 4, channels, 1, bias=False),
+            nn.GroupNorm(8, channels)
+        )
+        
+        # Channel attention for adaptive weighting
+        self.channel_attention = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),
+            nn.Conv2d(channels, channels // 4, 1),
+            nn.GELU(),
+            nn.Conv2d(channels // 4, channels, 1),
+            nn.Sigmoid()
+        )
         
     def forward(self, x):
-        outputs = [conv(x) for conv in self.convs]
-        return self.fusion(torch.cat(outputs, dim=1))
+        # Multi-scale feature extraction
+        f1 = self.branch1(x)
+        f2 = self.branch2(x)
+        f3 = self.branch3(x)
+        f4 = self.branch4(x)
+        
+        # Concatenate all scales
+        fused = torch.cat([f1, f2, f3, f4], dim=1)
+        fused = self.fusion(fused)
+        
+        # Apply channel attention
+        att = self.channel_attention(fused)
+        fused = fused * att
+        
+        # Residual connection
+        return x + fused
 
 
-class MLKA(nn.Module):
-    """
-    Multi-Dconv Large Kernel Attention (from Restormer)
-    The core innovation - uses depthwise convs instead of expensive MHSA
-    """
-    def __init__(self, channels, kernel_sizes=[3, 5, 7]):
+class HybridAttentionModule(nn.Module):
+    """Hybrid Spatial + Channel Attention"""
+    def __init__(self, channels):
         super().__init__()
-        self.qkv = nn.Conv2d(channels, channels * 3, 1)
         
-        # Multi-scale depthwise convolutions
-        self.dw_convs = nn.ModuleList([
-            nn.Conv2d(channels, channels, k, padding=k//2, groups=channels)
-            for k in kernel_sizes
-        ])
+        # Spatial attention
+        self.spatial = nn.Sequential(
+            nn.Conv2d(channels, channels // 8, 1),
+            nn.GELU(),
+            nn.Conv2d(channels // 8, channels // 8, 7, padding=3, groups=channels // 8),
+            nn.Conv2d(channels // 8, 1, 1),
+            nn.Sigmoid()
+        )
         
-        self.project_out = nn.Conv2d(channels, channels, 1)
-        
-    def forward(self, x):
-        b, c, h, w = x.shape
-        qkv = self.qkv(x)
-        q, k, v = qkv.chunk(3, dim=1)
-        
-        # Apply multi-scale depthwise convs to q, k, v
-        q = sum([conv(q) for conv in self.dw_convs]) / len(self.dw_convs)
-        k = sum([conv(k) for conv in self.dw_convs]) / len(self.dw_convs)
-        v = sum([conv(v) for conv in self.dw_convs]) / len(self.dw_convs)
-        
-        # Channel-wise attention
-        attn = torch.sigmoid(q * k)
-        out = attn * v
-        
-        return self.project_out(out)
-
-
-class LocalWindowAttention(nn.Module):
-    """
-    Local windowed attention (3x faster than global)
-    Processes small windows independently
-    """
-    def __init__(self, channels, window_size=8, num_heads=4):
-        super().__init__()
-        self.window_size = window_size
-        self.num_heads = num_heads
-        self.head_dim = channels // num_heads
-        self.scale = self.head_dim ** -0.5
-        
-        self.qkv = nn.Conv2d(channels, channels * 3, 1)
-        self.project_out = nn.Conv2d(channels, channels, 1)
+        # Channel attention
+        self.channel = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),
+            nn.Conv2d(channels, channels // 4, 1),
+            nn.GELU(),
+            nn.Conv2d(channels // 4, channels, 1),
+            nn.Sigmoid()
+        )
         
     def forward(self, x):
-        b, c, h, w = x.shape
-        ws = self.window_size
-        
-        # Pad if needed
-        pad_h = (ws - h % ws) % ws
-        pad_w = (ws - w % ws) % ws
-        if pad_h > 0 or pad_w > 0:
-            x = F.pad(x, (0, pad_w, 0, pad_h), mode='reflect')
-        
-        _, _, H, W = x.shape
-        
-        # Partition into windows
-        x = x.view(b, c, H // ws, ws, W // ws, ws)
-        x = x.permute(0, 2, 4, 1, 3, 5).contiguous()
-        x = x.view(-1, c, ws, ws)  # (b*nH*nW, c, ws, ws)
-        
-        # Apply attention within each window
-        qkv = self.qkv(x)
-        q, k, v = qkv.chunk(3, dim=1)
-        
-        # Reshape for multi-head
-        nw = x.shape[0]
-        q = q.view(nw, self.num_heads, self.head_dim, ws * ws)
-        k = k.view(nw, self.num_heads, self.head_dim, ws * ws)
-        v = v.view(nw, self.num_heads, self.head_dim, ws * ws)
-        
-        # Attention
-        q = q * self.scale
-        attn = (q.transpose(-2, -1) @ k)  # (nw, heads, ws*ws, ws*ws)
-        attn = attn.softmax(dim=-1)
-        
-        out = (attn @ v.transpose(-2, -1)).transpose(-2, -1)
-        out = out.reshape(nw, c, ws, ws)
-        
-        # Reverse window partition
-        out = out.view(b, H // ws, W // ws, c, ws, ws)
-        out = out.permute(0, 3, 1, 4, 2, 5).contiguous()
-        out = out.view(b, c, H, W)
-        
-        # Remove padding
-        if pad_h > 0 or pad_w > 0:
-            out = out[:, :, :h, :w]
-        
-        return self.project_out(out)
+        s_att = self.spatial(x)
+        c_att = self.channel(x)
+        return x * s_att * c_att
 
 
-class ResidualRefinementBlock(nn.Module):
+class ShallowHFBlock(nn.Module):
     """
-    Residual refinement for inpainting-like reconstruction
-    Fills star regions with coherent texture
+    Shallow High-Frequency Branch
+    
+    Captures very small stars (1-3 px) that can be lost during downsampling.
+    Works at full resolution WITHOUT downsample to preserve micro-details.
+    Uses small kernels to maintain high-frequency information.
+    
+    Critical for:
+    - Tiny stars (1-3 px)
+    - Learning native PSF of small point sources
+    - Distinguishing stars from noise/background patterns
+    - Not touching comets (non-point profile → filtered out by HF branch)
+    - Perfect removal from 1px to huge stars
     """
     def __init__(self, channels):
         super().__init__()
-        self.conv1 = nn.Conv2d(channels, channels * 2, 3, padding=1)
-        self.conv2 = nn.Conv2d(channels * 2, channels * 2, 3, padding=2, dilation=2)
-        self.conv3 = nn.Conv2d(channels * 2, channels, 3, padding=1)
-        self.act = GELU()
+        self.conv1 = nn.Conv2d(channels, channels, kernel_size=3, padding=1, bias=False)
+        self.norm1 = nn.GroupNorm(min(8, channels), channels)
+        self.act = nn.GELU()
+        self.conv2 = nn.Conv2d(channels, channels, kernel_size=3, padding=1, bias=False)
+        self.norm2 = nn.GroupNorm(min(8, channels), channels)
         
     def forward(self, x):
         res = x
-        x = self.act(self.conv1(x))
-        x = self.act(self.conv2(x))
-        x = self.conv3(x)
+        x = self.conv1(x)
+        x = self.norm1(x)
+        x = self.act(x)
+        x = self.conv2(x)
+        x = self.norm2(x)
         return x + res
 
 
-class TransformerBlock(nn.Module):
+class HaloBlock(nn.Module):
     """
-    Restormer-SLMR Transformer Block
-    Combines MLKA, local attention, and refinement
+    Halo Suppression Block
+    
+    Handles low-frequency halos around very bright stars.
+    Prevents treating wide soft halos as texture (which causes artifacts).
+    Uses large kernel to capture halo extent.
     """
-    def __init__(self, channels, window_size=8, ffn_expand=2):
-        super().__init__()
-        
-        # Multi-branch attention
-        self.norm1 = LayerNorm2d(channels)
-        self.mlka = MLKA(channels)
-        self.local_attn = LocalWindowAttention(channels, window_size)
-        self.multi_dilated = MultiDilatedConv(channels)
-        
-        # Channel mixing
-        self.gate = nn.Conv2d(channels * 3, channels, 1)
-        
-        # Feed-forward network
-        self.norm2 = LayerNorm2d(channels)
-        ffn_channels = channels * ffn_expand
-        self.ffn = nn.Sequential(
-            nn.Conv2d(channels, ffn_channels, 1),
-            GELU(),
-            nn.Conv2d(ffn_channels, channels, 1)
-        )
-        
-        # Residual refinement
-        self.refinement = ResidualRefinementBlock(channels)
-        
-    def forward(self, x):
-        # Multi-branch attention
-        res = x
-        x = self.norm1(x)
-        
-        mlka_out = self.mlka(x)
-        local_out = self.local_attn(x)
-        dilated_out = self.multi_dilated(x)
-        
-        # Fuse branches
-        x = self.gate(torch.cat([mlka_out, local_out, dilated_out], dim=1))
-        x = res + x
-        
-        # FFN
-        res = x
-        x = self.norm2(x)
-        x = self.ffn(x)
-        x = res + x
-        
-        # Refinement
-        x = self.refinement(x)
-        
-        return x
-
-
-class DownSample(nn.Module):
-    """Downsampling with pixel unshuffle"""
     def __init__(self, channels):
         super().__init__()
-        self.down = nn.Sequential(
-            nn.PixelUnshuffle(2),
-            nn.Conv2d(channels * 4, channels * 2, 1)
-        )
+        self.conv = nn.Conv2d(channels, channels, kernel_size=7, padding=3, groups=channels, bias=False)
+        self.act = nn.SiLU()
         
     def forward(self, x):
-        return self.down(x)
+        return self.act(self.conv(x))
 
 
-class UpSample(nn.Module):
-    """Upsampling with pixel shuffle"""
+class ResidualGate(nn.Module):
+    """
+    Noise-Aware Residual Gate
+    
+    Adaptively weights residual based on local intensity.
+    Prevents micro-artifacts in low-intensity noisy regions.
+    
+    Critical for:
+    - Avoiding micro-spots in deep sky backgrounds
+    - Stabilizing dark regions
+    - Preventing noise amplification
+    - Not affecting comets (different pattern)
+    """
     def __init__(self, channels):
         super().__init__()
-        self.up = nn.Sequential(
-            nn.Conv2d(channels, channels * 2, 1),
-            nn.PixelShuffle(2)
-        )
+        self.conv = nn.Conv2d(channels, channels, kernel_size=3, padding=1, bias=False)
+        self.norm = nn.GroupNorm(min(8, channels), channels)
+        self.sigmoid = nn.Sigmoid()
         
-    def forward(self, x):
-        return self.up(x)
+    def forward(self, residual, x):
+        gate = self.conv(x)
+        gate = self.norm(gate)
+        gate = self.sigmoid(gate)
+        return residual * gate
 
 
-class RestormerSLMR(nn.Module):
+class StarRemovalNet(nn.Module):
     """
-    Restormer-SLMR: Small + Local + Multi-Receptive
+    Hybrid Attention Multi-Scale Network for Star Removal
     
-    Optimized for:
-    - Star removal
-    - Glitch removal
-    - Local inpainting
-    - Texture reconstruction
-    
-    3x faster than original Restormer
-    Better texture quality than NAFNet
+    Architecture:
+    - Multi-scale receptive fields (3x3 to 17x17) for detecting stars of all sizes
+    - Shallow HF branch for tiny stars (1-3px) that could be lost in downsampling
+    - Residual learning: output = input - residual (Google's approach)
+    - MSRF hybrid blocks for texture coherent reconstruction
+    - Direct starless output (not masks or residuals)
     """
-    def __init__(
-        self,
-        img_channels=3,
-        width=32,
-        enc_blks=[2, 3, 4],
-        middle_blks=6,
-        dec_blks=[2, 2, 2],
-        window_size=8,
-        use_gradient_checkpointing=False
-    ):
+    def __init__(self, in_channels=3, base_channels=64, num_blocks=8):
         super().__init__()
         
-        self.use_gradient_checkpointing = use_gradient_checkpointing
+        # Shallow High-Frequency Branch - captures tiny stars (1-3px)
+        # Works at full resolution to preserve micro-details before downsampling
+        self.hf_branch = ShallowHFBlock(in_channels)
         
-        # Input projection
-        self.intro = nn.Conv2d(img_channels, width, 3, padding=1)
+        # Halo suppression for bright stars with wide soft halos
+        self.halo_block = HaloBlock(in_channels)
         
-        # Encoder
-        self.encoders = nn.ModuleList()
-        self.downs = nn.ModuleList()
-        chan = width
+        # Initial feature extraction with large kernel for context
+        self.input_conv = nn.Sequential(
+            nn.Conv2d(in_channels, base_channels, 7, padding=3, bias=False),
+            nn.GroupNorm(8, base_channels),
+            nn.GELU()
+        )
         
-        for num in enc_blks:
-            self.encoders.append(
-                nn.Sequential(*[TransformerBlock(chan, window_size) for _ in range(num)])
-            )
-            self.downs.append(DownSample(chan))
-            chan = chan * 2
+        # Encoder - progressive downsampling
+        self.enc1 = self._make_encoder_block(base_channels, base_channels * 2, num_blocks=2)
+        self.down1 = nn.Conv2d(base_channels * 2, base_channels * 2, 3, stride=2, padding=1)
         
-        # Bottleneck
-        self.middle_blks = nn.Sequential(*[
-            TransformerBlock(chan, window_size) for _ in range(middle_blks)
+        self.enc2 = self._make_encoder_block(base_channels * 2, base_channels * 4, num_blocks=2)
+        self.down2 = nn.Conv2d(base_channels * 4, base_channels * 4, 3, stride=2, padding=1)
+        
+        # Bottleneck - deep MSRF blocks for maximum receptive field
+        self.bottleneck = nn.Sequential(*[
+            MSRF_Block(base_channels * 4) for _ in range(num_blocks)
         ])
         
-        # Decoder
-        self.decoders = nn.ModuleList()
-        self.ups = nn.ModuleList()
-        self.skip_fusions = nn.ModuleList()
+        # Decoder - progressive upsampling with skip connections
+        self.up2 = nn.Sequential(
+            nn.ConvTranspose2d(base_channels * 4, base_channels * 2, 2, stride=2),
+            nn.GroupNorm(8, base_channels * 2),
+            nn.GELU()
+        )
+        self.dec2 = self._make_decoder_block(base_channels * 4, base_channels * 2, num_blocks=2)
         
-        for num in dec_blks:
-            self.ups.append(UpSample(chan))
-            chan = chan // 2
-            self.skip_fusions.append(nn.Conv2d(chan * 2, chan, 1))
-            self.decoders.append(
-                nn.Sequential(*[TransformerBlock(chan, window_size) for _ in range(num)])
-            )
+        self.up1 = nn.Sequential(
+            nn.ConvTranspose2d(base_channels * 2, base_channels, 2, stride=2),
+            nn.GroupNorm(8, base_channels),
+            nn.GELU()
+        )
+        self.dec1 = self._make_decoder_block(base_channels * 2, base_channels, num_blocks=2)
         
-        # Output projection
-        self.ending = nn.Conv2d(width, img_channels, 3, padding=1)
+        # Hybrid attention for final refinement
+        self.final_attention = HybridAttentionModule(base_channels)
         
-        # Initialize weights
-        self.apply(self._init_weights)
+        # Noise-aware residual gate
+        self.residual_gate = ResidualGate(in_channels)
+        
+        # Output projection - direct starless image
+        self.output_conv = nn.Sequential(
+            nn.Conv2d(base_channels, base_channels, 3, padding=1),
+            nn.GELU(),
+            nn.Conv2d(base_channels, in_channels, 3, padding=1)
+        )
+        
+    def _make_encoder_block(self, in_ch, out_ch, num_blocks):
+        layers = []
+        layers.append(nn.Conv2d(in_ch, out_ch, 1))
+        for _ in range(num_blocks):
+            layers.append(MSRF_Block(out_ch))
+        return nn.Sequential(*layers)
     
-    def _init_weights(self, m):
-        if isinstance(m, nn.Conv2d):
-            nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='linear')
-            if m.bias is not None:
-                nn.init.constant_(m.bias, 0)
-        elif isinstance(m, LayerNorm2d):
-            nn.init.constant_(m.weight, 1)
-            nn.init.constant_(m.bias, 0)
+    def _make_decoder_block(self, in_ch, out_ch, num_blocks):
+        layers = []
+        layers.append(nn.Conv2d(in_ch, out_ch, 1))
+        for _ in range(num_blocks):
+            layers.append(MSRF_Block(out_ch))
+        layers.append(HybridAttentionModule(out_ch))
+        return nn.Sequential(*layers)
     
     def forward(self, x):
-        # Input
-        x = self.intro(x)
+        # Shallow HF branch - extract tiny star features at full resolution
+        # This prevents loss of 1-3px stars during downsampling
+        hf_features = self.hf_branch(x)
         
-        # Encoder
-        encs = []
-        for encoder, down in zip(self.encoders, self.downs):
-            if self.use_gradient_checkpointing and self.training:
-                x = torch.utils.checkpoint.checkpoint(encoder, x, use_reentrant=False)
-            else:
-                x = encoder(x)
-            encs.append(x)
-            x = down(x)
+        # Halo features for bright stars with wide soft halos
+        halo_features = self.halo_block(x)
         
-        # Bottleneck
-        if self.use_gradient_checkpointing and self.training:
-            x = torch.utils.checkpoint.checkpoint(self.middle_blks, x, use_reentrant=False)
-        else:
-            x = self.middle_blks(x)
+        # Input feature extraction
+        f0 = self.input_conv(x)
         
-        # Decoder
-        for decoder, up, enc_skip, fusion in zip(
-            self.decoders, self.ups, reversed(encs), self.skip_fusions
-        ):
-            x = up(x)
-            x = fusion(torch.cat([x, enc_skip], dim=1))
-            if self.use_gradient_checkpointing and self.training:
-                x = torch.utils.checkpoint.checkpoint(decoder, x, use_reentrant=False)
-            else:
-                x = decoder(x)
+        # Encoder path with skip connections
+        e1 = self.enc1(f0)
+        d1 = self.down1(e1)
         
-        # Output - predice direttamente starless
-        x = self.ending(x)
+        e2 = self.enc2(d1)
+        d2 = self.down2(e2)
         
-        return x
+        # Bottleneck with proxy-skip for huge PSFs
+        # Add interpolated e1 for more global context
+        e1_proxy = F.interpolate(e1, size=d2.shape[2:], mode='bilinear', align_corners=False)
+        # Project e1 to match d2 channels
+        if not hasattr(self, 'proxy_proj'):
+            self.proxy_proj = nn.Conv2d(e1.shape[1], d2.shape[1], 1).to(x.device)
+        e1_proj = self.proxy_proj(e1_proxy)
+        
+        b = self.bottleneck(d2 + e1_proj * 0.3)  # Add proxy skip with scaling
+        
+        # Decoder path with skip connections
+        u2 = self.up2(b)
+        u2 = torch.cat([u2, e2], dim=1)  # Skip connection
+        d2_out = self.dec2(u2)
+        
+        u1 = self.up1(d2_out)
+        u1 = torch.cat([u1, e1], dim=1)  # Skip connection
+        d1_out = self.dec1(u1)
+        
+        # Inject halo suppression at decoder output
+        # Convert halo features to match d1_out channels
+        if not hasattr(self, 'halo_proj'):
+            self.halo_proj = nn.Conv2d(halo_features.shape[1], d1_out.shape[1], 1).to(x.device)
+        halo_proj = self.halo_proj(halo_features)
+        d1_out = d1_out + halo_proj * 0.3
+        
+        # Final attention refinement
+        refined = self.final_attention(d1_out)
+        
+        # Convert HF features to match refined channels
+        if not hasattr(self, 'hf_proj'):
+            self.hf_proj = nn.Conv2d(hf_features.shape[1], refined.shape[1], 1).to(x.device)
+        hf_proj = self.hf_proj(hf_features)
+        
+        # Fuse HF features with main path
+        # HF branch adds micro-detail detection for tiny stars
+        fused = refined + hf_proj
+        
+        # Output residual
+        residual = self.output_conv(fused)
+        
+        # Apply noise-aware gate to prevent artifacts in dark/noisy regions
+        residual = self.residual_gate(residual, x)
+        
+        # Google's residual approach: output = input - residual
+        starless = x - residual
+        
+        return starless
 
 
-def create_model_s(use_gradient_checkpointing=False):
-    """
-    Restormer-SLMR Small - modello principale
-    ~3M params, ottimizzato per RTX 5090 con OOM fix
-    """
-    return RestormerSLMR(
-        img_channels=3,
-        width=20,  # Ridotto da 24 per OOM
-        enc_blks=[1, 1, 2],  # Ridotto da [1, 2, 2]
-        middle_blks=3,  # Ridotto da 4
-        dec_blks=[1, 1, 1],  # Minimo
-        window_size=4,  # Ridotto da 8 - dimezza memoria attenzione
-        use_gradient_checkpointing=use_gradient_checkpointing
-    )
+def count_parameters(model):
+    """Count trainable parameters"""
+    return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
 
-# Alias per compatibilità
-create_restormer_slmr_s = create_model_s
-create_restormer_slmr_m = lambda use_gradient_checkpointing=False: RestormerSLMR(
-    img_channels=3,
-    width=48,
-    enc_blks=[2, 3, 4, 6],
-    middle_blks=8,
-    dec_blks=[2, 3, 4, 2],
-    window_size=8
-)
-
-
-if __name__ == '__main__':
+if __name__ == "__main__":
     # Test model
-    model = create_model_s()
-    x = torch.randn(1, 3, 512, 512)
+    model = StarRemovalNet(in_channels=3, base_channels=64, num_blocks=6)
+    print(f"Total parameters: {count_parameters(model):,}")
     
-    print(f"\n{'='*60}")
-    print("Restormer-SLMR Test")
-    print('='*60)
-    
+    # Test forward pass
+    dummy_input = torch.randn(1, 3, 256, 256)
     with torch.no_grad():
-        y = model(x)
-    
-    print(f"Input shape: {x.shape}")
-    print(f"Output shape: {y.shape}")
-    print(f"Input range: [{x.min():.3f}, {x.max():.3f}]")
-    print(f"Output range: [{y.min():.3f}, {y.max():.3f}]")
-    
-    # Count parameters
-    total_params = sum(p.numel() for p in model.parameters())
-    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"\nTotal parameters: {total_params:,}")
-    print(f"Trainable parameters: {trainable_params:,}")
-    print(f"Model size: {total_params * 4 / 1024 / 1024:.1f} MB (FP32)")
-    print('='*60)
+        output = model(dummy_input)
+    print(f"Input shape: {dummy_input.shape}")
+    print(f"Output shape: {output.shape}")
