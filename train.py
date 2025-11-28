@@ -152,7 +152,7 @@ class Trainer:
             inputs = batch['input'].to(self.device)
             targets = batch['target'].to(self.device)
             
-            with torch.amp.autocast('cuda'):
+            with autocast():
                 outputs = self.model(inputs)
                 
                 # Compute residual for penalty term
@@ -273,14 +273,14 @@ def main():
     # Configuration
     config = {
         'data_root': '.',
-        'batch_size': 4,            # Reduced for OOM - increase if you have headroom
-        'num_workers': 8,           # Adjust based on CPU cores
-        'image_size': None,         # None = use original size, or (H, W) to resize
-        'base_channels': 64,        # Model width
-        'num_blocks': 6,            # Model depth (6-8 optimal for balance)
+        'batch_size': 8,            # Increased back since images are 512x512
+        'num_workers': 4,           # Adjust based on CPU cores
+        'image_size': None,         # None = use original 512x512 tiles
+        'base_channels': 48,        # Reduced from 64 to save memory
+        'num_blocks': 4,            # Reduced from 6 to save memory
         'lr': 2e-4,                 # Learning rate
         'epochs': 100,
-        'gradient_accumulation_steps': 4,  # Effective batch = 4*4 = 16
+        'gradient_accumulation_steps': 2,  # Effective batch = 8*2 = 16
         'checkpoint_dir': 'checkpoints',
         'resume': None              # Path to checkpoint to resume from
     }
