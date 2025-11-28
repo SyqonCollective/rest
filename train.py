@@ -97,7 +97,7 @@ class Trainer:
             targets = batch['target'].to(self.device)
             
             # Mixed precision forward pass
-            with autocast():
+            with torch.amp.autocast('cuda'):
                 outputs = self.model(inputs)
                 
                 # Compute residual for penalty term
@@ -152,7 +152,7 @@ class Trainer:
             inputs = batch['input'].to(self.device)
             targets = batch['target'].to(self.device)
             
-            with autocast():
+            with torch.amp.autocast('cuda'):
                 outputs = self.model(inputs)
                 
                 # Compute residual for penalty term
@@ -273,14 +273,14 @@ def main():
     # Configuration
     config = {
         'data_root': '.',
-        'batch_size': 16,           # RTX 5090 can handle large batches
+        'batch_size': 4,            # Reduced for OOM - increase if you have headroom
         'num_workers': 8,           # Adjust based on CPU cores
         'image_size': None,         # None = use original size, or (H, W) to resize
         'base_channels': 64,        # Model width
         'num_blocks': 6,            # Model depth (6-8 optimal for balance)
         'lr': 2e-4,                 # Learning rate
         'epochs': 100,
-        'gradient_accumulation_steps': 1,  # Increase if OOM
+        'gradient_accumulation_steps': 4,  # Effective batch = 4*4 = 16
         'checkpoint_dir': 'checkpoints',
         'resume': None              # Path to checkpoint to resume from
     }
